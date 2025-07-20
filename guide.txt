@@ -1,0 +1,121 @@
+아래는 fastmcp를 사용해 MCP 서버를 만드는 방법에 대한 단계별 가이드야. 먼저, fastmcp가 Model Context Protocol (MCP)을 위한 Python 프레임워크라는 걸 확인했어. MCP는 AI 모델(예: LLM)이 외부 도구나 리소스를 안전하게 접근할 수 있게 해주는 프로토콜이야. trace32 (Lauterbach TRACE32 디버거)를 제어하는 MCP 서버를 만들려면, 기존 trace32 Python 라이브러리 (lauterbach-trace32-rcl)를 fastmcp의 'tool'로 통합하면 돼. 이 라이브러리는 TRACE32의 Remote API를 통해 명령 실행, 메모리 읽기 등을 지원해.
+
+이 가이드는 실제 코드 예시와 함께 설명할게. TRACE32가 이미 설치되어 있고, Remote API가 활성화된 상태라고 가정해. (만약 아니면, Lauterbach 공식 문서에서 TRACE32 설치와 config.t32 파일 설정을 확인해.)
+
+1. 환경 설정 및 라이브러리 설치
+Python 3.8+ 환경이 필요해. (추천: virtualenv 사용)
+fastmcp와 trace32 라이브러리 설치:
+text
+
+접기
+
+자동 줄바꿈
+
+복사
+pip install fastmcp lauterbach-trace32-rcl
+fastmcp: MCP 서버 빌드 프레임워크.gofastmcp.compypi.org
+lauterbach-trace32-rcl (pyrcl): TRACE32를 Python으로 제어하는 라이브러리.pypi.orgwww2.lauterbach.com
+TRACE32 Remote API 설정:
+TRACE32 인스턴스를 실행하고, config.t32 파일에 다음을 추가해 Remote API를 활성화해 (TCP 모드 추천):
+text
+
+
+
+RCL=NETTCP
+PORT=20000
+TRACE32를 시작: 예를 들어, t32marm.exe -c config.t32 (플랫폼에 맞게 조정).
+Python에서 연결할 호스트/포트는 'localhost:20000'으로 가정할게. 필요 시 변경.
+2. MCP 서버 코드 작성
+fastmcp로 서버를 만들면, trace32를 제어하는 함수를 @mcp.tool 데코레이터로 등록할 수 있어. 이 tool은 AI 클라이언트가 호출하면 trace32 명령을 실행해 결과를 반환해.
+
+아래는 간단한 예시 코드야 (server.py 파일로 저장). 이 서버는 trace32에 연결해 명령을 실행하는 tool을 하나 제공해. (예: 변수 값 읽기나 PRACTICE 스크립트 실행.)
+
+python
+
+접기
+
+자동 줄바꿈
+
+실행
+
+복사
+from fastmcp import FastMCP
+from lauterbach.trace32.rcl import RemoteControl  # trace32 라이브러리 임포트
+
+# TRACE32 연결 설정 (RemoteControl 인스턴스 생성)
+t32 = RemoteControl(host='localhost', port=20000, packlen=1024)  # 호스트/포트 맞게 조정
+t32.connect()  # 연결
+
+mcp = FastMCP("Trace32 Control Server 🚀")  # MCP 서버 인스턴스 생성
+
+@mcp.tool
+def execute_trace32_command(command: str) -> str:
+    """
+    Execute a TRACE32 PRACTICE command and return the result.
+    :param command: The TRACE32 command to run (e.g., 'Data.List' or 'Var.Set myVar=10')
+    :return: Command execution result or error message.
+    """
+    try:
+        # TRACE32 명령 실행 (PDF 예시 기반)
+        t32.api.T32_Cmd(command.encode('utf-8'))  # 명령 전송
+        state = 1
+        while state != 0:  # PRACTICE 스크립트 완료 대기
+            state = t32.api.T32_GetPracticeState()
+        
+        # 결과 메시지 읽기
+        error_code = bytearray(4)
+        message = bytearray(256)
+        t32.api.T32_GetMessage(message, error_code)
+        result = message.decode('utf-8').strip()
+        
+        if error_code[0] != 0:
+            return f"Error: {result}"
+        return result
+    except Exception as e:
+        return f"Execution failed: {str(e)}"
+
+if __name__ == "__main__":
+    mcp.run(transport="http", host="127.0.0.1", port=8000, path="/mcp")  # HTTP로 서버 실행 (로컬: http://localhost:8000/mcp)
+설명:
+FastMCP("Trace32 Control Server 🚀"): 서버 이름 설정.
+@mcp.tool: trace32 명령을 실행하는 함수를 tool로 등록. 함수의 docstring과 타입 힌트가 자동으로 MCP 스키마로 변환돼.gofastmcp.comgithub.com
+execute_trace32_command: trace32 API를 사용해 명령 실행. (PDF에서 추출한 예시: T32_Cmd, T32_GetPracticeState, T32_GetMessage 사용).www2.lauterbach.comrepo.lauterbach.com
+더 많은 tool 추가 가능: 예를 들어, 메모리 읽기 (T32_ReadMemory), 변수 모니터링 (T32_ReadVariableValue) 등.
+3. 서버 실행 및 테스트
+서버 실행:
+text
+
+접기
+
+자동 줄바꿈
+
+복사
+python server.py
+기본: STDIO 모드 (로컬 테스트용).
+HTTP 모드 (위 코드처럼): http://localhost:8000/mcp에서 접근 가능. (웹 배포 추천)youtube.com
+테스트:
+fastmcp 클라이언트 사용 (pip install fastmcp 이미 했으니까):
+python
+
+
+
+
+from fastmcp import Client
+import asyncio
+
+async def test():
+    async with Client("http://localhost:8000/mcp") as client:  # 서버 URL
+        tools = await client.list_tools()  # 사용 가능한 tool 목록
+        print(tools)
+        
+        result = await client.call_tool("execute_trace32_command", {"command": "Data.List"})  # tool 호출
+        print(result.text)
+
+asyncio.run(test())
+결과: trace32 명령이 실행되고, MCP를 통해 결과 반환.
+4. 확장 팁
+더 많은 trace32 기능 추가: PDF 문서에 따라 메모리 접근 (T32_ReadMemory), 브레이크포인트 설정 (T32_WriteBreakpoint) 등을 tool로 만들어.www2.lauterbach.com
+보안/인증: fastmcp는 기본 인증 지원. 문서에서 mcp.run(auth=...) 추가.
+배포: Docker나 cloud에 HTTP 서버로 배포. fastmcp 문서에서 proxying이나 production 패턴 확인.gofastmcp.com
+문제 발생 시: TRACE32 연결 오류는 config.t32 확인. fastmcp 로그로 디버깅.
+이게 기본적인 방법이야. 더 구체적인 trace32 명령이나 추가 tool이 필요하면, 세부 요구사항 알려줘!
